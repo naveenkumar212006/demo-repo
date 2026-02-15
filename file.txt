@@ -1,0 +1,146 @@
+import os, glob
+import cv2
+import numpy as np
+import pandas as pd
+from tensorflow.keras.models import load_model
+
+# ========= SETTINGS =========
+MODEL_PATH = "digit_model.h5"
+DATA_DIR = "scans"
+OUTPUT_EXCEL = "results.xlsx"
+IMG_SIZE = 28
+
+# ========= LOAD MODEL =========
+model = load_model(MODEL_PATH)
+
+# ========= ROI BOXES (from your build_boxes output) =========
+REG_BOXES = [
+    (205, 282, 20, 30),
+    (227, 286, 25, 27),
+    (254, 286, 24, 29),
+    (279, 286, 25, 32),
+    (306, 291, 21, 26),
+    (329, 294, 24, 25),
+    (353, 297, 26, 24),
+    (379, 293, 22, 30),
+    (403, 297, 22, 27),
+    (426, 300, 26, 26),
+    (452, 299, 22, 27),
+    (474, 300, 26, 24),
+]
+
+SPR_BOXES = [
+    (616, 309, 26, 21),
+    (644, 309, 21, 24),
+    (666, 308, 22, 25),
+    (690, 310, 22, 27),
+]
+
+# IA checkbox area (we will implement logic later)
+IA_BOX = (555, 395, 44, 32)
+
+CO_ALL_BOXES = [
+    (228, 1101, 70, 42),  # CO1 allotted
+    (296, 1104, 68, 36),  # CO2 allotted
+    (365, 1099, 60, 39),  # CO3 allotted
+]
+
+CO_OBT_BOXES = [
+    (233, 1058, 60, 40),  # CO1 obtained
+    (297, 1058, 63, 40),  # CO2 obtained
+    (366, 1059, 62, 41),  # CO3 obtained
+]
+
+def preprocess_cell(cell_gray):
+    """Clean and prepare digit cell for CNN"""
+    cell = cv2.resize(cell_gray, (IMG_SIZE, IMG_SIZE))
+    cell = cell.astype("float32") / 255.0
+    return cell.reshape(1, IMG_SIZE, IMG_SIZE, 1)
+
+def predict_digit(cell_gray):
+    x = preprocess_cell(cell_gray)
+    pred = model.predict(x, verbose=0)[0]
+    return int(np.argmax(pred)), float(np.max(pred))
+
+def read_number(page_gray, boxes):
+    """Read multi-digit number from list of boxes"""
+    digits = []
+    confs = []
+    for (x, y, w, h) in boxes:
+        cell = page_gray[y:y+h, x:x+w]
+        d, c = predict_digit(cell)
+        digits.append(str(d))
+        confs.append(c)
+    return "".join(digits), float(np.mean(confs)) if confs else 0.0
+
+def read_single_digit(page_gray, box):
+    x, y, w, h = box
+    cell = page_gray[y:y+h, x:x+w]
+    d, c = predict_digit(cell)
+    return d, c
+
+def process_one_page(img_path):
+    page = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+    if page is None:
+        return None
+
+    reg, reg_conf = read_number(page, REG_BOXES)
+    spr, spr_conf = read_number(page, SPR_BOXES)
+
+    co_all_1, c1a = read_single_digit(page, CO_ALL_BOXES[0])
+    co_all_2, c2a = read_single_digit(page, CO_ALL_BOXES[1])
+    co_all_3, c3a = read_single_digit(page, CO_ALL_BOXES[2])
+
+    co_obt_1, c1o = read_single_digit(page, CO_OBT_BOXES[0])
+    co_obt_2, c2o = read_single_digit(page, CO_OBT_BOXES[1])
+    co_obt_3, c3o = read_single_digit(page, CO_OBT_BOXES[2])
+
+    total_obt = int(co_obt_1) + int(co_obt_2) + int(co_obt_3)
+    total_all = int(co_all_1) + int(co_all_2) + int(co_all_3)
+
+    return {
+        "File": os.path.basename(img_path),
+        "RegisterNo": reg,
+        "SPRNo": spr,
+        "CO1_Allotted": co_all_1,
+        "CO2_Allotted": co_all_2,
+        "CO3_Allotted": co_all_3,
+        "Total_Allotted": total_all,
+        "CO1_Obtained": co_obt_1,
+        "CO2_Obtained": co_obt_2,
+        "CO3_Obtained": co_obt_3,
+        "Total_Obtained": total_obt,
+        "Reg_Conf": reg_conf,
+        "SPR_Conf": spr_conf,
+        "CO_All_Conf_Avg": float(np.mean([c1a, c2a, c3a])),
+        "CO_Obt_Conf_Avg": float(np.mean([c1o, c2o, c3o])),
+    }
+
+def main():
+    images = sorted(
+        glob.glob(os.path.join(DATA_DIR, "*.jpg")) +
+        glob.glob(os.path.join(DATA_DIR, "*.png")) +
+        glob.glob(os.path.join(DATA_DIR, "*.jpeg"))
+    )
+
+    if not images:
+        print("❌ No images found in scans/ folder")
+        return
+
+    rows = []
+    for img_path in images:
+        # skip template sample if you want
+        # if os.path.basename(img_path).lower() == "sample.jpg":
+        #     continue
+
+        row = process_one_page(img_path)
+        if row:
+            rows.append(row)
+            print(f"✅ {row['File']}  Reg={row['RegisterNo']}  Total={row['Total_Obtained']}")
+
+    df = pd.DataFrame(rows)
+    df.to_excel(OUTPUT_EXCEL, index=False)
+    print(f"\n✅ Saved Excel: {OUTPUT_EXCEL}")
+
+if __name__ == "__main__":
+    main()
